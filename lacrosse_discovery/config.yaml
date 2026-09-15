@@ -1,11 +1,13 @@
 ---
 name: LaCrosse Discovery
-version: "1.0.1"
+version: "1.1.0"
 slug: lacrosse_discovery
 description: >-
   Scans every serial port for a JeeLink running the LaCrosseITPlusReader
-  sketch, listens for LaCrosse/Technoline sensor packets and generates a
-  ready-to-paste `sensor: - platform: lacrosse` configuration block.
+  sketch, listens for LaCrosse/Technoline sensor packets, generates a
+  ready-to-paste `sensor: - platform: lacrosse` configuration block, and can
+  optionally bridge sensors to Home Assistant via MQTT Discovery so they get
+  proper unique IDs and full UI management.
 url: https://github.com/sinise/lacrosse-addons
 arch:
   - aarch64
@@ -21,9 +23,21 @@ ingress_port: 8099
 panel_icon: mdi:thermometer-lines
 panel_title: LaCrosse Discovery
 uart: true
+services:
+  - mqtt:want
 map:
   - addon_config:rw
 options:
   scan_duration: 60
+  mqtt_enabled: false
+  discovery_prefix: "homeassistant"
+  expire_after: 1800
 schema:
   scan_duration: int(10,600)
+  mqtt_enabled: bool
+  discovery_prefix: str
+  expire_after: int(60,86400)
+  mqtt_host: str?
+  mqtt_port: port?
+  mqtt_username: str?
+  mqtt_password: password?

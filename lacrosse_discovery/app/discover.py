@@ -37,6 +37,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
+import paho.mqtt.client as mqtt
 import serial
 from flask import Flask, Response, jsonify, request
 from serial.tools import list_ports
@@ -54,10 +55,20 @@ READING_RE = re.compile(r"^OK (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)$")
 RESULT_DIR = os.environ.get("RESULT_DIR", ".")
 RESULT_FILE = os.path.join(RESULT_DIR, "lacrosse.yaml")
 
+MQTT_ENABLED = os.environ.get("MQTT_ENABLED", "false").strip().lower() == "true"
+MQTT_HOST = os.environ.get("MQTT_HOST", "").strip()
+MQTT_PORT = int(os.environ.get("MQTT_PORT") or 1883)
+MQTT_USERNAME = os.environ.get("MQTT_USERNAME", "").strip()
+MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "")
+MQTT_SSL = os.environ.get("MQTT_SSL", "false").strip().lower() == "true"
+DISCOVERY_PREFIX = os.environ.get("DISCOVERY_PREFIX", "homeassistant").strip() or "homeassistant"
+EXPIRE_AFTER = int(os.environ.get("EXPIRE_AFTER") or 1800)
+
 app = Flask(__name__)
 
 STATE_LOCK = threading.RLock()
-STOP_EVENT = threading.Event()
+SCAN_STOP_EVENT = threading.Event()   # stops a manual, finite-duration scan only
+BRIDGED_DEVICES: set[str] = set()      # devices already owned by the persistent MQTT bridge
 STATE = {
     "scanning": False,
     "phase": None,          # "probing" | "listening" | None
@@ -67,6 +78,56 @@ STATE = {
     "finished_at": None,
     "ports": {},             # device -> port record (see new_port_record)
 }
+
+_mqtt_client: "mqtt.Client | None" = None
+_mqtt_connected = False
+_mqtt_client_lock = threading.Lock()
+_mqtt_discovery_published: set[tuple[str, str]] = set()
+_mqtt_discovery_lock = threading.Lock()
+
+
+def mqtt_available() -> bool:
+    return MQTT_ENABLED and bool(MQTT_HOST)
+
+
+def get_mqtt_client() -> "mqtt.Client | None":
+    """Lazily create (and keep reusing) a connected MQTT client, if configured."""
+    global _mqtt_client
+    if not mqtt_available():
+        return None
+    with _mqtt_client_lock:
+        if _mqtt_client is not None:
+            return _mqtt_client
+
+        def on_connect(client, userdata, flags, rc):
+            global _mqtt_connected
+            _mqtt_connected = rc == 0
+            if rc == 0:
+                log.info("Connected to MQTT broker %s:%s", MQTT_HOST, MQTT_PORT)
+            else:
+                log.warning("MQTT connect failed: %s", mqtt.connack_string(rc))
+
+        def on_disconnect(client, userdata, rc):
+            global _mqtt_connected
+            _mqtt_connected = False
+            log.warning("Disconnected from MQTT broker (rc=%s)", rc)
+
+        client = mqtt.Client(client_id="lacrosse_discovery", protocol=mqtt.MQTTv311)
+        if MQTT_USERNAME:
+            client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD or None)
+        if MQTT_SSL:
+            client.tls_set()
+        client.on_connect = on_connect
+        client.on_disconnect = on_disconnect
+        client.reconnect_delay_set(min_delay=1, max_delay=30)
+        try:
+            client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
+        except (OSError, ConnectionError) as exc:
+            log.warning("Could not connect to MQTT broker %s:%s - %s", MQTT_HOST, MQTT_PORT, exc)
+            return None
+        client.loop_start()
+        _mqtt_client = client
+        return client
 
 
 def new_port_record(port) -> dict:
@@ -212,7 +273,86 @@ def record_reading(port_record: dict, reading: dict) -> None:
     port_record["packet_count"] += 1
 
 
-def listen_on_port(device: str, duration: float) -> None:
+def mqtt_device_id(device: str, sensor_id: int) -> str:
+    return f"lacrosse_{slugify(os.path.basename(device))}_{sensor_id}"
+
+
+def mqtt_state_topic(device: str, sensor_id: int) -> str:
+    return f"lacrosse_discovery/{mqtt_device_id(device, sensor_id)}/state"
+
+
+def publish_discovery_if_needed(client: "mqtt.Client", device: str, sensor_id: int, sensor: dict) -> None:
+    device_id = mqtt_device_id(device, sensor_id)
+    state_topic = mqtt_state_topic(device, sensor_id)
+    ha_device = {
+        "identifiers": [device_id],
+        "name": f"LaCrosse sensor {sensor_id}",
+        "manufacturer": "LaCrosse/Technoline",
+        "model": f"JeeLink sensor type {sensor['sensor_type']}",
+        "via_device": f"lacrosse_discovery_{slugify(os.path.basename(device))}",
+    }
+
+    keys = ["temperature", "battery"]
+    if sensor["humidity_ever_valid"]:
+        keys.append("humidity")
+
+    with _mqtt_discovery_lock:
+        for key in keys:
+            marker = (device_id, key)
+            if marker in _mqtt_discovery_published:
+                continue
+            payload = {
+                "name": key.capitalize(),
+                "unique_id": f"{device_id}_{key}",
+                "state_topic": state_topic,
+                "value_template": f"{{{{ value_json.{key} }}}}",
+                "json_attributes_topic": state_topic,
+                "device": ha_device,
+                "expire_after": EXPIRE_AFTER,
+            }
+            if key == "temperature":
+                payload.update(device_class="temperature", unit_of_measurement="°C", state_class="measurement")
+            elif key == "humidity":
+                payload.update(device_class="humidity", unit_of_measurement="%", state_class="measurement")
+            elif key == "battery":
+                payload["icon"] = "mdi:battery"
+
+            config_topic = f"{DISCOVERY_PREFIX}/sensor/{device_id}/{key}/config"
+            client.publish(config_topic, json.dumps(payload), qos=1, retain=True)
+            _mqtt_discovery_published.add(marker)
+
+
+def publish_state(client: "mqtt.Client", device: str, sensor_id: int, sensor: dict) -> None:
+    payload = {
+        "temperature": sensor["last_temperature"],
+        "battery": "low" if sensor["low_battery"] else "ok",
+        "low_battery": sensor["low_battery"],
+        "new_battery": sensor["new_battery"],
+        "sensor_type": sensor["sensor_type"],
+        "last_seen": sensor["last_seen"],
+    }
+    if sensor["humidity_ever_valid"]:
+        payload["humidity"] = sensor["last_humidity"]
+    client.publish(mqtt_state_topic(device, sensor_id), json.dumps(payload), qos=0, retain=True)
+
+
+def mqtt_publish_reading(device: str, sensor_id: int, sensor: dict) -> None:
+    client = get_mqtt_client()
+    if client is None:
+        return
+    try:
+        publish_discovery_if_needed(client, device, sensor_id, sensor)
+        publish_state(client, device, sensor_id, sensor)
+    except Exception:
+        log.exception("Failed to publish MQTT update for %s sensor %s", device, sensor_id)
+
+
+def listen_on_port(device: str, duration: float | None, stop_event: threading.Event) -> None:
+    """Listen for sensor packets on `device`.
+
+    duration=None means listen forever (used by the persistent MQTT bridge);
+    a finite duration is used by manual, ad-hoc scans from the web UI.
+    """
     try:
         ser = serial.Serial(device, BAUD, timeout=0.5)
     except (serial.SerialException, OSError) as exc:
@@ -223,8 +363,8 @@ def listen_on_port(device: str, duration: float) -> None:
     try:
         time.sleep(BOOT_SETTLE)
         ser.reset_input_buffer()
-        deadline = time.time() + duration
-        while time.time() < deadline and not STOP_EVENT.is_set():
+        deadline = None if duration is None else time.time() + duration
+        while (deadline is None or time.time() < deadline) and not stop_event.is_set():
             raw = ser.readline()
             if not raw:
                 continue
@@ -236,6 +376,9 @@ def listen_on_port(device: str, duration: float) -> None:
                 continue
             with STATE_LOCK:
                 record_reading(STATE["ports"][device], reading)
+                sensor_snapshot = dict(STATE["ports"][device]["sensors"][reading["sensor_id"]])
+            if mqtt_available():
+                mqtt_publish_reading(device, reading["sensor_id"], sensor_snapshot)
     except (serial.SerialException, OSError) as exc:
         with STATE_LOCK:
             STATE["ports"][device]["error"] = f"Lost connection while listening: {exc}"
@@ -247,7 +390,7 @@ def listen_on_port(device: str, duration: float) -> None:
 
 
 def run_full_scan(duration: float) -> None:
-    STOP_EVENT.clear()
+    SCAN_STOP_EVENT.clear()
     with STATE_LOCK:
         STATE["scanning"] = True
         STATE["phase"] = "probing"
@@ -255,10 +398,14 @@ def run_full_scan(duration: float) -> None:
         STATE["duration"] = duration
         STATE["started_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         STATE["finished_at"] = None
-        STATE["ports"] = {}
+        # Ports already owned by the persistent MQTT bridge keep their live record;
+        # everything else gets re-probed from scratch.
+        STATE["ports"] = {d: r for d, r in STATE["ports"].items() if d in BRIDGED_DEVICES}
 
     ports = [p for p in list_ports.comports()]
     for port in ports:
+        if port.device in BRIDGED_DEVICES:
+            continue  # already probed and being listened to continuously by the MQTT bridge
         record = new_port_record(port)
         with STATE_LOCK:
             STATE["ports"][port.device] = record
@@ -278,9 +425,12 @@ def run_full_scan(duration: float) -> None:
         log.info("Probe result for %s: %s (%s)", port.device, result["status"], result["sketch_info"])
 
     with STATE_LOCK:
-        jeelink_devices = [d for d, r in STATE["ports"].items() if r["probe_status"] == "jeelink"]
+        jeelink_devices = [
+            d for d, r in STATE["ports"].items() if r["probe_status"] == "jeelink" and d not in BRIDGED_DEVICES
+        ]
+        any_jeelink = any(r["probe_status"] == "jeelink" for r in STATE["ports"].values())
 
-    if not jeelink_devices:
+    if not any_jeelink:
         with STATE_LOCK:
             STATE["scanning"] = False
             STATE["phase"] = None
@@ -288,14 +438,17 @@ def run_full_scan(duration: float) -> None:
             STATE["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         return
 
-    with STATE_LOCK:
-        STATE["phase"] = "listening"
-
-    threads = [threading.Thread(target=listen_on_port, args=(d, duration), daemon=True) for d in jeelink_devices]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    if jeelink_devices:
+        with STATE_LOCK:
+            STATE["phase"] = "listening"
+        threads = [
+            threading.Thread(target=listen_on_port, args=(d, duration, SCAN_STOP_EVENT), daemon=True)
+            for d in jeelink_devices
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
     with STATE_LOCK:
         STATE["scanning"] = False
@@ -310,6 +463,41 @@ def run_full_scan(duration: float) -> None:
         log.info("Wrote generated config to %s", RESULT_FILE)
     except OSError as exc:
         log.warning("Could not write %s: %s", RESULT_FILE, exc)
+
+
+def run_mqtt_bridge() -> None:
+    """Continuously listen on every JeeLink found at startup and publish
+    readings to MQTT via HA MQTT Discovery, for the lifetime of the add-on."""
+    if not mqtt_available():
+        log.info("MQTT bridge not starting: mqtt_enabled is false or no broker host is configured.")
+        return
+
+    log.info("MQTT bridge: probing serial ports for a JeeLink to bridge...")
+    never_stop = threading.Event()  # the bridge only stops when the add-on process exits
+
+    for port in list_ports.comports():
+        if not is_usb_port(port):
+            continue
+        with STATE_LOCK:
+            record = new_port_record(port)
+            STATE["ports"][port.device] = record
+            STATE["ports"][port.device]["probe_status"] = "probing"
+        result = probe_port(port.device)
+        with STATE_LOCK:
+            rec = STATE["ports"][port.device]
+            rec["probe_status"] = result["status"]
+            rec["sketch_info"] = result["sketch_info"]
+            rec["error"] = result["error"]
+        if result["status"] != "jeelink":
+            continue
+        with STATE_LOCK:
+            BRIDGED_DEVICES.add(port.device)
+        log.info("MQTT bridge: listening on %s indefinitely", port.device)
+        threading.Thread(target=listen_on_port, args=(port.device, None, never_stop), daemon=True).start()
+
+    if not BRIDGED_DEVICES:
+        log.warning("MQTT bridge: no JeeLink found at startup. Re-run a manual scan once one is connected"
+                     " and restart the add-on to bridge it.")
 
 
 def build_port_yaml(device: str, record: dict, multi_port: bool) -> str:
@@ -407,7 +595,7 @@ def api_scan():
 
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
-    STOP_EVENT.set()
+    SCAN_STOP_EVENT.set()
     return jsonify({"status": "stopping"})
 
 
@@ -428,10 +616,20 @@ def api_status():
                     **{k: v for k, v in rec.items() if k != "sensors"},
                     "sensors": [rec["sensors"][sid] for sid in sorted(rec["sensors"])],
                     "yaml": build_port_yaml(device, rec, multi_port),
+                    "bridged": device in BRIDGED_DEVICES,
                 }
                 for device, rec in ports.items()
             ],
             "combined_yaml": build_combined_yaml(ports),
+            "mqtt": {
+                "enabled": MQTT_ENABLED,
+                "configured": mqtt_available(),
+                "connected": _mqtt_connected,
+                "host": MQTT_HOST or None,
+                "port": MQTT_PORT,
+                "discovery_prefix": DISCOVERY_PREFIX,
+                "bridged_ports": sorted(BRIDGED_DEVICES),
+            },
         }
     return jsonify(snapshot)
 
@@ -477,9 +675,12 @@ sensor packets, and generates a <code>sensor: - platform: lacrosse</code> block 
   </div>
 </div>
 
+<h2>MQTT bridge</h2>
+<div class="card" id="mqttCard"><span class="muted">Loading...</span></div>
+
 <h2>Ports</h2>
 <div class="card"><table id="portsTable">
-  <thead><tr><th>Device</th><th>Description</th><th>Status</th><th>Sketch / info</th><th>Sensors seen</th></tr></thead>
+  <thead><tr><th>Device</th><th>Description</th><th>Status</th><th>Sketch / info</th><th>Sensors seen</th><th>MQTT</th></tr></thead>
   <tbody></tbody>
 </table></div>
 
@@ -536,6 +737,19 @@ function refresh() {
     document.getElementById('statusLine').textContent = statusText;
     if (!data.scanning && polling) { clearInterval(polling); polling = null; }
 
+    const mqttCard = document.getElementById('mqttCard');
+    const m = data.mqtt || {};
+    if (!m.enabled) {
+      mqttCard.innerHTML = '<span class="muted">Disabled. Turn on <code>mqtt_enabled</code> in this add-on\'s Configuration tab to bridge sensors as full, UI-managed entities via MQTT Discovery.</span>';
+    } else if (!m.configured) {
+      mqttCard.innerHTML = '<span class="status-busy">Enabled, but no broker host is known. Install/start the Mosquitto broker add-on, or set mqtt_host manually in Configuration.</span>';
+    } else {
+      const cls = m.connected ? 'status-jeelink' : 'status-busy';
+      mqttCard.innerHTML = `<span class="${cls}">${m.connected ? 'Connected' : 'Not connected'}</span> to ${m.host}:${m.port}
+        &middot; discovery prefix <code>${m.discovery_prefix}</code>
+        &middot; bridging ${m.bridged_ports.length} port(s)`;
+    }
+
     const tbody = document.querySelector('#portsTable tbody');
     tbody.innerHTML = '';
     (data.ports || []).forEach(p => {
@@ -544,7 +758,8 @@ function refresh() {
         <td>${p.description || ''}</td>
         <td class="status-${p.probe_status}">${p.probe_status}</td>
         <td>${p.sketch_info || p.error || ''}</td>
-        <td>${p.sensors.length}</td>`;
+        <td>${p.sensors.length}</td>
+        <td>${p.bridged ? '<span class="status-jeelink">bridged</span>' : ''}</td>`;
       tbody.appendChild(tr);
     });
 
@@ -574,4 +789,6 @@ refresh();
 
 
 if __name__ == "__main__":
+    if mqtt_available():
+        threading.Thread(target=run_mqtt_bridge, daemon=True).start()
     app.run(host="0.0.0.0", port=8099, threaded=True)

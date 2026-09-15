@@ -9,6 +9,12 @@ whenever you replug the dongle or swap a sensor's battery.
 This add-on scans your host for a JeeLink, listens for real sensor packets,
 and writes out the exact YAML block you can paste into `configuration.yaml`.
 
+It can also run as a persistent **MQTT bridge**: it publishes sensors to Home
+Assistant via [MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery),
+so instead of the `lacrosse` platform's unique-ID-less entities, you get
+normal, fully UI-manageable entities (rename, move to an area, disable, etc.)
+that keep updating live for as long as the add-on runs.
+
 ## How it works
 
 1. **Probe.** The add-on opens every USB-serial port it can see
@@ -43,6 +49,38 @@ and writes out the exact YAML block you can paste into `configuration.yaml`.
    that the new entities appear with the values you expect.
 5. Rename the `name:` fields to something meaningful once you know which
    physical sensor each ID belongs to (e.g. "Outside", "Garage").
+
+## MQTT bridge mode (recommended over the YAML block)
+
+The `lacrosse` YAML platform's entities never get a `unique_id`, so Home
+Assistant can't manage them from the UI (rename, area, disable) - see
+[the integration's own limitation](https://www.home-assistant.io/integrations/lacrosse/).
+Bridging over MQTT instead gives every sensor a real, UI-manageable entity.
+
+1. Install and start the official **Mosquitto broker** add-on (or point at
+   any external broker - see below).
+2. Open this add-on's **Configuration** tab and turn on **mqtt_enabled**.
+   Leave `mqtt_host` etc. blank to auto-discover the Mosquitto broker add-on;
+   fill them in only if you're using a different/external broker.
+3. Optionally adjust `discovery_prefix` (default `homeassistant`, only
+   change this if you've customized your MQTT integration's discovery
+   prefix) and `expire_after` (seconds after which an entity goes
+   `unavailable` if no new reading arrives - default 1800s/30min, generous
+   given sensors typically transmit every 30-60s).
+4. Restart the add-on. On startup it probes every serial port once, and for
+   every JeeLink it finds, listens **indefinitely** and publishes each
+   reading to MQTT with retained discovery messages. The web UI's **MQTT
+   bridge** card shows connection status and which ports are bridged.
+5. New entities (`sensor.lacrosse_<port>_<id>_temperature/_humidity/_battery`)
+   appear automatically under **Settings -> Devices & services -> MQTT** as
+   sensors are heard - each physical sensor becomes one HA "device" grouping
+   its temperature/humidity/battery entities.
+6. A newly plugged-in JeeLink (or one connected after the add-on started) is
+   only picked up on the next add-on restart - the bridge only probes for
+   dongles once, at startup.
+7. The manual **Start scan** button still works independently for discovery
+   purposes; it skips ports already owned by the bridge (shown as
+   `bridged` in the Ports table) and just displays their live data.
 
 ## Notes and caveats
 
