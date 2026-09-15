@@ -53,7 +53,10 @@ export MQTT_HOST MQTT_PORT MQTT_USERNAME MQTT_PASSWORD MQTT_SSL
 # first, and only scan every /dev/ttyUSB*//dev/ttyACM* candidate if that
 # fails. Serial device nodes can briefly report busy right after the
 # container boots, so retry a few times with a settle delay before giving up.
-CONFIGURED_PORT=$(bashio::config 'com_port' '')
+CONFIGURED_PORT=""
+if bashio::config.has_value 'com_port'; then
+    CONFIGURED_PORT=$(bashio::config 'com_port')
+fi
 COM_PORT="${CONFIGURED_PORT}"
 
 if bashio::config.true 'autodiscover_ports'; then
@@ -72,7 +75,7 @@ if bashio::config.true 'autodiscover_ports'; then
                 COM_PORT="${FOUND}"
                 bashio::log.info "discovery: using ${COM_PORT}"
                 if [ "${FOUND}" != "${CONFIGURED_PORT}" ]; then
-                    bashio::app.option 'com_port' "${COM_PORT}" \
+                    bashio::addon.option 'com_port' "${COM_PORT}" \
                         || bashio::log.warning "discovery: could not save discovered com_port to app options"
                 fi
                 break

@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.0.2
+
+Two bugs from real-world logs, both in `run.sh`:
+
+- `bashio::config 'com_port' ''` didn't actually default to empty: bash's
+  `${2:-default}` treats an explicitly-passed empty string the same as
+  "not passed", so bashio's own hardcoded `"null"` default won instead of
+  the empty string I tried to pass. `com_port` is now read with an
+  `bashio::config.has_value` guard instead (matching the pattern already
+  used for the `mqtt_*` options), so it's a real empty string when unset.
+  In practice this was mostly cosmetic - `discover_port()` already falls
+  back to a full scan when the configured port doesn't respond, so
+  discovery still succeeded, just with a confusing "verifying configured
+  port null" log line.
+- `bashio::app.option` doesn't exist in the bashio version bundled in the
+  pinned base image - only the older `bashio::addon.option` name does
+  (also what autoterm-5d-control uses). This is why a discovered port was
+  never actually saved, forcing a full ~35s port scan on every restart.
+  Switched to `bashio::addon.option`.
+
 ## 2.0.1
 
 - Fix a misleading-freshness bug: sensor state was published with
