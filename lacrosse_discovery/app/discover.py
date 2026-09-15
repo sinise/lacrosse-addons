@@ -127,19 +127,39 @@ def list_candidate_ports() -> list[str]:
     return sorted(set(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")))
 
 
+BY_ID_RESOLVE_ATTEMPTS = 8
+BY_ID_RESOLVE_DELAY = 1.5
+
+
 def resolve_by_id(devpath: str) -> str:
     """Resolve devpath to its stable /dev/serial/by-id/... symlink, if one
     exists. /dev/ttyUSBx names can be reassigned across reboots/replugs;
-    the by-id path survives that. Falls back to the raw path (with a
-    warning) for cheap clones that don't expose a USB serial number."""
+    the by-id path survives that - and it's what mqtt_device_id() hashes
+    into each sensor's unique_id, so returning a different form of the
+    same port across restarts would show up in HA as a brand new device.
+
+    udev creates by-id symlinks asynchronously *after* the raw /dev/ttyUSBx
+    node already exists and is openable, so a probe that succeeds quickly
+    (e.g. verifying an already-known-good port, rather than a slow full
+    scan) can run before the symlink shows up. Retry for a few seconds
+    before giving up and falling back to the raw path."""
     try:
         target = os.path.realpath(devpath)
-        for candidate in glob.glob("/dev/serial/by-id/*"):
-            if os.path.realpath(candidate) == target:
-                return candidate
     except OSError:
-        pass
-    log.warning("discovery: no /dev/serial/by-id link found for %s, using the raw path", devpath)
+        target = None
+
+    if target:
+        for attempt in range(BY_ID_RESOLVE_ATTEMPTS):
+            for candidate in glob.glob("/dev/serial/by-id/*"):
+                try:
+                    if os.path.realpath(candidate) == target:
+                        return candidate
+                except OSError:
+                    continue
+            if attempt < BY_ID_RESOLVE_ATTEMPTS - 1:
+                time.sleep(BY_ID_RESOLVE_DELAY)
+
+    log.warning("discovery: no /dev/serial/by-id link found for %s after retrying, using the raw path", devpath)
     return devpath
 
 

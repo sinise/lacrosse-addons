@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.0.3
+
+- Fix duplicate MQTT devices appearing after every restart:
+  `resolve_by_id()` globbed `/dev/serial/by-id/*` exactly once, with no
+  retry. `udev` creates that symlink *after* the raw `/dev/ttyUSBx` node
+  is already openable, and since 2.0.2 made re-verifying an
+  already-known-good port much faster than a full scan, discovery could
+  now finish before the symlink existed - silently falling back to the
+  raw path, which hashes into a *different* `unique_id` than the by-id
+  path used before. Each such restart both created a new device in HA and
+  overwrote the good saved `com_port` with the worse one, compounding on
+  the next restart. `resolve_by_id()` now retries for up to ~12s before
+  falling back.
+
+  This does not clean up devices duplicated by earlier versions - delete
+  the stale one(s) manually from Settings -> Devices & services -> MQTT
+  (the one that stopped updating, keeping whichever still receives live
+  readings).
+
 ## 2.0.2
 
 Two bugs from real-world logs, both in `run.sh`:
