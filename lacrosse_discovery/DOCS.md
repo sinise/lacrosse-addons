@@ -46,12 +46,22 @@ and writes out the exact YAML block you can paste into `configuration.yaml`.
 
 ## Notes and caveats
 
-- **The add-on requests full device access** (`full_access: true`) so it
-  can find the JeeLink without you having to tell it which port to use
-  first. During a scan it briefly opens and writes a single byte to
-  *every* serial port it finds - harmless for virtually all USB-serial
-  devices, but if you have another sensitive serial device attached and
-  want to be extra cautious, unplug it before scanning.
+- **The add-on maps in every serial device** (`uart: true`) so it can find
+  the JeeLink without you having to tell it which port to use first.
+  During a scan it briefly opens and writes a single byte to *every*
+  serial port it finds - harmless for virtually all USB-serial devices,
+  but if you have another sensitive serial device attached and want to be
+  extra cautious, unplug it before scanning.
+- **If a port shows `busy` with `Operation not permitted`**, the container
+  couldn't get access to that device node. This add-on intentionally
+  avoids `full_access`/privileged mode (which Supervisor only grants to
+  add-ons with *Protection mode* turned off) in favor of the more scoped
+  `uart: true`. If your JeeLink still isn't picked up as a UART device
+  (rare, but possible with some CH340-based clones or unusual host
+  setups), the fallback is: enable **Advanced Mode** on your HA user
+  profile, open this add-on's *Info* tab, turn **Protection mode** off,
+  and change `uart: true` to `full_access: true` in `config.yaml` before
+  reinstalling.
 - **JeeLinks reset when the serial port is opened**, so each probe/listen
   waits ~2 seconds for the sketch to reboot before talking to it.
 - If a sensor never reported a plausible humidity value (temperature-only

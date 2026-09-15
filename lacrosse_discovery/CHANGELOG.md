@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.1
+
+- Replace `full_access: true` with `uart: true`. `full_access` is silently
+  ignored for "protected" add-ons (the default), which caused
+  `Operation not permitted` errors when opening serial ports; `uart: true`
+  maps in all serial devices without requiring Protection mode to be
+  disabled.
+
 ## 1.0.0
 
 - Initial release: probes serial ports for a JeeLink running
