@@ -1,8 +1,9 @@
 # lacrosse
 
-A Home Assistant add-on that discovers JeeLink USB dongles and the LaCrosse
-sensor IDs they're receiving, and generates the `sensor: - platform: lacrosse`
-config block to paste into `configuration.yaml`. See
+A headless Home Assistant add-on that auto-discovers a JeeLink USB dongle's
+serial port, remembers it, and bridges LaCrosse/Technoline sensor readings
+to Home Assistant via MQTT Discovery - so they show up as normal,
+fully UI-manageable entities. See
 [`lacrosse_discovery/DOCS.md`](lacrosse_discovery/DOCS.md) for how it works.
 
 ## Installing
@@ -13,9 +14,10 @@ config block to paste into `configuration.yaml`. See
    `/addons/local/lacrosse_discovery` (e.g. via the Samba or SSH/Terminal
    add-on).
 2. In Home Assistant: **Settings -> Add-ons -> Add-on Store -> ⋮ -> Check for
-   updates** (or reload the page) - "LaCrosse Discovery" appears under
+   updates** (or reload the page) - "LaCrosse MQTT Bridge" appears under
    **Local add-ons**.
-3. Install, start it, and open its Web UI.
+3. Install, and start it - no further setup needed if the official
+   Mosquitto broker add-on is already running.
 
 **As a custom repository:**
 
@@ -24,4 +26,4 @@ config block to paste into `configuration.yaml`. See
    `lacrosse_discovery/config.yaml` to point at it.
 2. In Home Assistant: **Settings -> Add-ons -> Add-on Store -> ⋮ -> Repositories**,
    add the repo URL.
-3. Install "LaCrosse Discovery" from the store.
+3. Install "LaCrosse MQTT Bridge" from the store.

@@ -13,8 +13,8 @@ COPY run.sh /run.sh
 RUN chmod a+x /run.sh
 
 LABEL \
-    org.opencontainers.image.title="LaCrosse Discovery" \
-    org.opencontainers.image.description="Scans serial ports for a JeeLink and discovers LaCrosse sensor IDs" \
+    org.opencontainers.image.title="LaCrosse MQTT Bridge" \
+    org.opencontainers.image.description="Finds a JeeLink and bridges LaCrosse sensor readings to Home Assistant via MQTT" \
     org.opencontainers.image.licenses="MIT"
 
 CMD [ "/run.sh" ]

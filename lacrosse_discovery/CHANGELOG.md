@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.0.0
+
+Breaking rewrite: this add-on is now a headless MQTT bridge only - the
+generated YAML config block was never used and is gone.
+
+- **Removed**: the web UI, Ingress, manual "Start scan", and
+  `sensor: - platform: lacrosse` YAML generation (`scan_duration` option
+  and the `/config/lacrosse.yaml` file are gone too).
+- **Added `com_port` option and port auto-discovery/persistence**, matching
+  the same verify-then-scan pattern as this author's autoterm-5d-control
+  add-on: on every start, the configured `com_port` is checked first; if
+  that's not a JeeLink (or nothing is configured yet), every
+  `/dev/ttyUSB*`/`/dev/ttyACM*` is scanned. Whichever port answers is
+  resolved to its stable `/dev/serial/by-id/...` path and saved back into
+  `com_port` via the Supervisor API, so subsequent restarts skip scanning
+  entirely. New `autodiscover_ports` option (default true) to disable this
+  and use `com_port` as configured. Keeps the ~10s settle delay + up to 4
+  retries for the busy-right-after-boot race fixed in 1.1.1.
+- `mqtt_enabled` now defaults to **true** and `boot` defaults to **auto**,
+  since bridging is the add-on's only function now.
+- If reading from the port fails after it's already bridging (dongle
+  unplugged, etc.), it now retries reopening the same port every 15s
+  instead of giving up until a restart.
+- MQTT state topic prefix changed from `lacrosse_discovery/` to
+  `lacrosse_bridge/` (internal detail only - `unique_id`s are unchanged, so
+  existing entities are not duplicated; HA just needs the next retained
+  discovery republish to switch over, which happens automatically).
+
 ## 1.1.1
 
 - Fix the MQTT bridge finding no JeeLink at startup: serial device nodes

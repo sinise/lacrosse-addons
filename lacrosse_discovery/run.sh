@@ -1,17 +1,11 @@
 #!/usr/bin/with-contenv bashio
 set -e
 
-SCAN_DURATION=$(bashio::config 'scan_duration')
-export SCAN_DURATION
-
-RESULT_DIR="/config"
-mkdir -p "${RESULT_DIR}"
-export RESULT_DIR
+export DISCOVERY_PREFIX=$(bashio::config 'discovery_prefix')
+export EXPIRE_AFTER=$(bashio::config 'expire_after')
 
 MQTT_ENABLED=$(bashio::config 'mqtt_enabled')
 export MQTT_ENABLED
-export DISCOVERY_PREFIX=$(bashio::config 'discovery_prefix')
-export EXPIRE_AFTER=$(bashio::config 'expire_after')
 
 MQTT_HOST=""
 MQTT_PORT="1883"
@@ -54,8 +48,49 @@ fi
 
 export MQTT_HOST MQTT_PORT MQTT_USERNAME MQTT_PASSWORD MQTT_SSL
 
-bashio::log.info "Default scan duration: ${SCAN_DURATION}s"
-bashio::log.info "Generated YAML will also be saved under ${RESULT_DIR}/lacrosse.yaml"
-bashio::log.info "Starting LaCrosse Discovery web UI..."
+# --- JeeLink port discovery -------------------------------------------------
+# Same pattern as the autoterm-5d-control add-on: verify the configured port
+# first, and only scan every /dev/ttyUSB*//dev/ttyACM* candidate if that
+# fails. Serial device nodes can briefly report busy right after the
+# container boots, so retry a few times with a settle delay before giving up.
+CONFIGURED_PORT=$(bashio::config 'com_port' '')
+COM_PORT="${CONFIGURED_PORT}"
 
+if bashio::config.true 'autodiscover_ports'; then
+    ATTEMPTS=4
+    SETTLE=10
+    RETRY_DELAY=20
+
+    bashio::log.info "discovery: waiting ${SETTLE}s for serial devices to settle..."
+    sleep "${SETTLE}"
+
+    for i in $(seq 1 "${ATTEMPTS}"); do
+        bashio::log.info "discovery: looking for a JeeLink (attempt ${i}/${ATTEMPTS})..."
+        if DISCOVERY_OUT=$(python3 /app/discover.py --discover-port "${CONFIGURED_PORT}"); then
+            FOUND=$(echo "${DISCOVERY_OUT}" | grep '^COM_PORT=' | cut -d= -f2-)
+            if [ -n "${FOUND}" ]; then
+                COM_PORT="${FOUND}"
+                bashio::log.info "discovery: using ${COM_PORT}"
+                if [ "${FOUND}" != "${CONFIGURED_PORT}" ]; then
+                    bashio::app.option 'com_port' "${COM_PORT}" \
+                        || bashio::log.warning "discovery: could not save discovered com_port to app options"
+                fi
+                break
+            fi
+        fi
+        bashio::log.warning "discovery: no JeeLink found on attempt ${i}/${ATTEMPTS}"
+        if [ "${i}" -lt "${ATTEMPTS}" ]; then
+            sleep "${RETRY_DELAY}"
+        fi
+    done
+else
+    bashio::log.info "discovery: autodiscover_ports is false, using the configured com_port as-is"
+fi
+
+if [ -z "${COM_PORT}" ]; then
+    bashio::log.warning "discovery: no JeeLink port known - restart the add-on once one is connected."
+fi
+export COM_PORT
+
+bashio::log.info "Starting LaCrosse MQTT bridge..."
 exec python3 /app/discover.py
