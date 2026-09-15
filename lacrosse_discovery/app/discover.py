@@ -389,6 +389,36 @@ def listen_on_port(device: str, duration: float | None, stop_event: threading.Ev
             pass
 
 
+def probe_all_ports(skip_devices: set[str]) -> None:
+    """Probe every USB-serial port not in `skip_devices`, updating STATE as it goes."""
+    for port in list_ports.comports():
+        if port.device in skip_devices:
+            continue
+        record = new_port_record(port)
+        with STATE_LOCK:
+            STATE["ports"][port.device] = record
+        if not record["is_usb"]:
+            with STATE_LOCK:
+                STATE["ports"][port.device]["probe_status"] = "not_jeelink"
+                STATE["ports"][port.device]["sketch_info"] = "skipped (not a USB serial device)"
+            continue
+        with STATE_LOCK:
+            STATE["ports"][port.device]["probe_status"] = "probing"
+        log.info("Probing %s ...", port.device)
+        result = probe_port(port.device)
+        with STATE_LOCK:
+            rec = STATE["ports"][port.device]
+            rec["probe_status"] = result["status"]
+            rec["sketch_info"] = result["sketch_info"]
+            rec["error"] = result["error"]
+        log.info(
+            "Probe result for %s: %s (%s)",
+            port.device,
+            result["status"],
+            result["sketch_info"] or result["error"] or "no info",
+        )
+
+
 def run_full_scan(duration: float) -> None:
     SCAN_STOP_EVENT.clear()
     with STATE_LOCK:
@@ -402,27 +432,7 @@ def run_full_scan(duration: float) -> None:
         # everything else gets re-probed from scratch.
         STATE["ports"] = {d: r for d, r in STATE["ports"].items() if d in BRIDGED_DEVICES}
 
-    ports = [p for p in list_ports.comports()]
-    for port in ports:
-        if port.device in BRIDGED_DEVICES:
-            continue  # already probed and being listened to continuously by the MQTT bridge
-        record = new_port_record(port)
-        with STATE_LOCK:
-            STATE["ports"][port.device] = record
-        if not record["is_usb"]:
-            record["probe_status"] = "not_jeelink"
-            record["sketch_info"] = "skipped (not a USB serial device)"
-            continue
-        with STATE_LOCK:
-            STATE["ports"][port.device]["probe_status"] = "probing"
-        log.info("Probing %s ...", port.device)
-        result = probe_port(port.device)
-        with STATE_LOCK:
-            rec = STATE["ports"][port.device]
-            rec["probe_status"] = result["status"]
-            rec["sketch_info"] = result["sketch_info"]
-            rec["error"] = result["error"]
-        log.info("Probe result for %s: %s (%s)", port.device, result["status"], result["sketch_info"])
+    probe_all_ports(skip_devices=BRIDGED_DEVICES)
 
     with STATE_LOCK:
         jeelink_devices = [
@@ -465,6 +475,11 @@ def run_full_scan(duration: float) -> None:
         log.warning("Could not write %s: %s", RESULT_FILE, exc)
 
 
+BRIDGE_STARTUP_SETTLE = 10.0  # let /dev nodes finish settling right after container boot
+BRIDGE_PROBE_ATTEMPTS = 4
+BRIDGE_RETRY_DELAY = 20.0
+
+
 def run_mqtt_bridge() -> None:
     """Continuously listen on every JeeLink found at startup and publish
     readings to MQTT via HA MQTT Discovery, for the lifetime of the add-on."""
@@ -472,32 +487,42 @@ def run_mqtt_bridge() -> None:
         log.info("MQTT bridge not starting: mqtt_enabled is false or no broker host is configured.")
         return
 
-    log.info("MQTT bridge: probing serial ports for a JeeLink to bridge...")
     never_stop = threading.Event()  # the bridge only stops when the add-on process exits
 
-    for port in list_ports.comports():
-        if not is_usb_port(port):
-            continue
+    # Serial device nodes can briefly report busy/not-ready right after the
+    # container boots (seen in practice: every port came back "busy" on the
+    # very first probe pass, but succeeded moments later). Give it a moment,
+    # and retry a few times before giving up.
+    log.info("MQTT bridge: waiting %.0fs for serial devices to settle...", BRIDGE_STARTUP_SETTLE)
+    time.sleep(BRIDGE_STARTUP_SETTLE)
+
+    for attempt in range(1, BRIDGE_PROBE_ATTEMPTS + 1):
+        log.info("MQTT bridge: probing serial ports for a JeeLink to bridge (attempt %d/%d)...",
+                  attempt, BRIDGE_PROBE_ATTEMPTS)
+        probe_all_ports(skip_devices=BRIDGED_DEVICES)
+
         with STATE_LOCK:
-            record = new_port_record(port)
-            STATE["ports"][port.device] = record
-            STATE["ports"][port.device]["probe_status"] = "probing"
-        result = probe_port(port.device)
-        with STATE_LOCK:
-            rec = STATE["ports"][port.device]
-            rec["probe_status"] = result["status"]
-            rec["sketch_info"] = result["sketch_info"]
-            rec["error"] = result["error"]
-        if result["status"] != "jeelink":
-            continue
-        with STATE_LOCK:
-            BRIDGED_DEVICES.add(port.device)
-        log.info("MQTT bridge: listening on %s indefinitely", port.device)
-        threading.Thread(target=listen_on_port, args=(port.device, None, never_stop), daemon=True).start()
+            newly_found = [
+                d for d, r in STATE["ports"].items() if r["probe_status"] == "jeelink" and d not in BRIDGED_DEVICES
+            ]
+            BRIDGED_DEVICES.update(newly_found)
+
+        for device in newly_found:
+            log.info("MQTT bridge: listening on %s indefinitely", device)
+            threading.Thread(target=listen_on_port, args=(device, None, never_stop), daemon=True).start()
+
+        if BRIDGED_DEVICES:
+            break
+        if attempt < BRIDGE_PROBE_ATTEMPTS:
+            log.warning("MQTT bridge: no JeeLink found on attempt %d/%d, retrying in %.0fs...",
+                        attempt, BRIDGE_PROBE_ATTEMPTS, BRIDGE_RETRY_DELAY)
+            time.sleep(BRIDGE_RETRY_DELAY)
 
     if not BRIDGED_DEVICES:
-        log.warning("MQTT bridge: no JeeLink found at startup. Re-run a manual scan once one is connected"
-                     " and restart the add-on to bridge it.")
+        log.warning(
+            "MQTT bridge: no JeeLink found after %d attempts. Once one is available/free, restart the add-on to bridge it.",
+            BRIDGE_PROBE_ATTEMPTS,
+        )
 
 
 def build_port_yaml(device: str, record: dict, multi_port: bool) -> str:

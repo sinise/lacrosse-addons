@@ -75,9 +75,11 @@ Bridging over MQTT instead gives every sensor a real, UI-manageable entity.
    appear automatically under **Settings -> Devices & services -> MQTT** as
    sensors are heard - each physical sensor becomes one HA "device" grouping
    its temperature/humidity/battery entities.
-6. A newly plugged-in JeeLink (or one connected after the add-on started) is
-   only picked up on the next add-on restart - the bridge only probes for
-   dongles once, at startup.
+6. At startup the bridge waits ~10s for serial devices to settle, then
+   probes for a JeeLink up to 4 times (20s apart) before giving up - this
+   covers the brief window right after boot where ports can report busy. A
+   newly plugged-in JeeLink (or one connected after that startup window) is
+   only picked up on the next add-on restart.
 7. The manual **Start scan** button still works independently for discovery
    purposes; it skips ports already owned by the bridge (shown as
    `bridged` in the Ports table) and just displays their live data.

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.1
+
+- Fix the MQTT bridge finding no JeeLink at startup: serial device nodes
+  can briefly report busy right after the container boots (observed: every
+  port came back busy on the very first probe, succeeding moments later on
+  a manual retry). The bridge now waits ~10s before its first probe and
+  retries up to 4 times, 20s apart, before giving up. Probing is also now
+  shared code between the manual scan and the bridge, with clearer
+  per-port log lines either way.
+
 ## 1.1.0
 
 - Add an optional persistent MQTT bridge mode (`mqtt_enabled`): publishes

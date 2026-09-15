@@ -1,6 +1,6 @@
 ---
 name: LaCrosse Discovery
-version: "1.1.0"
+version: "1.1.1"
 slug: lacrosse_discovery
 description: >-
   Scans every serial port for a JeeLink running the LaCrosseITPlusReader
