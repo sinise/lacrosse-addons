@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.0.1
+
+- Fix a misleading-freshness bug: sensor state was published with
+  `retain=True`, so the broker kept redelivering the last known reading to
+  every new subscriber (e.g. on a Home Assistant restart) regardless of
+  how old it actually was - and HA treated each redelivery as a fresh
+  update, resetting `last_changed` and the `expire_after` countdown. A
+  reading from hours ago could keep looking "9 minutes old" indefinitely.
+  State is now published with `retain=False`; discovery config topics
+  (which must stay retained) are unaffected. Also added a one-time cleanup
+  that explicitly clears any stale retained state message already sitting
+  on the broker (both the current and the pre-2.0.0 topic name) the next
+  time each sensor is heard from.
+
 ## 2.0.0
 
 Breaking rewrite: this add-on is now a headless MQTT bridge only - the

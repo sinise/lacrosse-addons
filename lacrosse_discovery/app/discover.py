@@ -289,9 +289,29 @@ def mqtt_state_topic(device: str, sensor_id: int) -> str:
     return f"lacrosse_bridge/{mqtt_device_id(device, sensor_id)}/state"
 
 
+_mqtt_legacy_retain_cleared: set[str] = set()
+
+
+def clear_legacy_retained_state(client: "mqtt.Client", device: str, sensor_id: int) -> None:
+    """One-time cleanup: earlier versions published the state topic with
+    retain=True (under an older topic prefix too), which the broker keeps
+    serving to every new subscriber forever - including HA on every
+    restart - regardless of how old the payload actually is. Publishing an
+    empty payload with retain=True clears a retained message; do this once
+    per sensor per process lifetime, for both the current and the old
+    (pre-2.0.0) topic name, so no stale value lingers on the broker."""
+    device_id = mqtt_device_id(device, sensor_id)
+    if device_id in _mqtt_legacy_retain_cleared:
+        return
+    _mqtt_legacy_retain_cleared.add(device_id)
+    for prefix in ("lacrosse_bridge", "lacrosse_discovery"):
+        client.publish(f"{prefix}/{device_id}/state", payload=None, qos=0, retain=True)
+
+
 def publish_discovery_if_needed(client: "mqtt.Client", device: str, sensor_id: int, sensor: dict) -> None:
     device_id = mqtt_device_id(device, sensor_id)
     state_topic = mqtt_state_topic(device, sensor_id)
+    clear_legacy_retained_state(client, device, sensor_id)
     ha_device = {
         "identifiers": [device_id],
         "name": f"LaCrosse sensor {sensor_id}",
@@ -340,7 +360,10 @@ def publish_state(client: "mqtt.Client", device: str, sensor_id: int, sensor: di
     }
     if sensor["humidity_ever_valid"]:
         payload["humidity"] = sensor["last_humidity"]
-    client.publish(mqtt_state_topic(device, sensor_id), json.dumps(payload), qos=0, retain=True)
+    # Not retained: a retained state message gets redelivered by the broker on every
+    # resubscribe (e.g. a HA restart), which HA treats as a fresh update - resetting
+    # last_changed and the expire_after countdown even though the payload is stale.
+    client.publish(mqtt_state_topic(device, sensor_id), json.dumps(payload), qos=0, retain=False)
 
 
 def mqtt_publish_reading(device: str, sensor_id: int, sensor: dict) -> None:

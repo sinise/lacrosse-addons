@@ -1,6 +1,6 @@
 ---
 name: LaCrosse MQTT Bridge
-version: "2.0.0"
+version: "2.0.1"
 slug: lacrosse_discovery
 description: >-
   Finds a JeeLink running the LaCrosseITPlusReader sketch, listens for
